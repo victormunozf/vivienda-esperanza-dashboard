@@ -1,189 +1,244 @@
-"""Dashboard local Vivienda Esperanza. Ejecutar: python -m streamlit run app.py"""
-import sqlite3
+"""Vivienda Esperanza | Streamlit + Supabase. Ejecutar: python -m streamlit run app.py"""
+import hashlib
+import hmac
+import json
+import secrets
 from datetime import date, datetime
 from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from supabase import create_client
 
+st.set_page_config(page_title="Valorización RCD | Vivienda Esperanza", page_icon="♻️", layout="wide")
 BASE = Path(__file__).resolve().parent
-DB = BASE / 'vivienda_esperanza.sqlite3'
-st.set_page_config(page_title='Valorización de residuos | Vivienda Esperanza', page_icon='♻️', layout='wide')
 
-@st.cache_resource
-def conexion():
-    c = sqlite3.connect(str(DB), check_same_thread=False, timeout=20)
-    c.execute('PRAGMA journal_mode=WAL')
-    c.execute('''CREATE TABLE IF NOT EXISTS reportes (id INTEGER PRIMARY KEY AUTOINCREMENT,
-        fecha TEXT NOT NULL, responsable TEXT NOT NULL, nota TEXT NOT NULL,
-        creado TEXT NOT NULL, actualizado TEXT NOT NULL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS partidas (id INTEGER PRIMARY KEY AUTOINCREMENT,
-        reporte_id INTEGER NOT NULL, etapa TEXT NOT NULL, material TEXT NOT NULL,
-        cantidad REAL NOT NULL, unidad TEXT NOT NULL, destino TEXT NOT NULL,
-        calidad TEXT NOT NULL, costo_clp REAL NOT NULL DEFAULT 0,
-        ahorro_clp REAL NOT NULL DEFAULT 0, costo_valorizacion_clp REAL NOT NULL DEFAULT 0,
-        evidencia TEXT NOT NULL DEFAULT '', FOREIGN KEY(reporte_id) REFERENCES reportes(id))''')
-    c.commit()
-    return c
 
-c = conexion()
-def consulta(sql, args=()):
-    return pd.read_sql_query(sql, c, params=args)
-def clp(x):
-    return '$' + f'{x:,.0f}'.replace(',', '.')
+def setting(section, key, default=""):
+    try:
+        return str(st.secrets[section][key])
+    except (KeyError, FileNotFoundError):
+        return default
 
-st.markdown('''<style>
-.block-container{padding-top:1.1rem;max-width:1500px}
-.hero{background:linear-gradient(110deg,#092d45,#116c82);border-radius:18px;padding:24px 28px;color:white;margin-bottom:18px}
-.hero h1{color:white;margin:0;font-size:2.1rem}.hero p{color:#e5f4f6;margin:7px 0 0}
-[data-testid="stMetric"]{border:1px solid #cbdde1;border-radius:14px;padding:14px;background:rgba(120,170,180,.06)}
-</style>''', unsafe_allow_html=True)
-logo = BASE / 'logo_duoc_uc.png'
+
+@st.cache_resource(show_spinner=False)
+def db_client(url, key):
+    return create_client(url, key)
+
+
+def verify_password(candidate, encoded):
+    """Formato: pbkdf2_sha256$iteraciones$salt_hex$hash_hex."""
+    try:
+        method, rounds, salt, expected = encoded.split("$")
+        if method != "pbkdf2_sha256":
+            return False
+        actual = hashlib.pbkdf2_hmac("sha256", candidate.encode(), bytes.fromhex(salt), int(rounds))
+        return hmac.compare_digest(actual, bytes.fromhex(expected))
+    except (ValueError, TypeError):
+        return False
+
+
+def clp(value):
+    return "$" + f"{float(value or 0):,.0f}".replace(",", ".")
+
+
+def load(table, order="id"):
+    # Consultas del servidor, nunca del navegador; no exponer credenciales.
+    result = db.table(table).select("*").order(order, desc=True).limit(2000).execute()
+    return pd.DataFrame(result.data or [])
+
+
+st.markdown("""<style>
+.block-container{max-width:1450px;padding-top:1.1rem}
+.hero{background:linear-gradient(110deg,#102e43,#146f80);padding:22px 26px;border-radius:18px;color:white;margin-bottom:15px}
+.hero h1{color:white;margin:0;font-size:2.05rem}.hero p{margin:6px 0 0;color:#e5f2f4}
+[data-testid="stMetric"]{border:1px solid #58798450;border-radius:14px;padding:12px;background:#748e9511}
+</style>""", unsafe_allow_html=True)
+logo = BASE / "logo_duoc_uc.png"
 if logo.exists():
-    a,b=st.columns([1,7],vertical_alignment='center')
-    with a: st.image(str(logo),use_container_width=True)
-    with b: st.markdown('<div class="hero"><h1>♻️ Valorización de residuos</h1><p>Duoc UC · Vivienda Esperanza · Control físico y económico de RCD</p></div>',unsafe_allow_html=True)
+    left, right = st.columns([1, 7], vertical_alignment="center")
+    with left:
+        st.image(str(logo), use_container_width=True)
+    with right:
+        st.markdown('<div class="hero"><h1>♻️ Valorización de residuos</h1><p>Vivienda Esperanza · Control físico, económico y trazabilidad RCD · Duoc UC</p></div>', unsafe_allow_html=True)
 else:
-    st.markdown('<div class="hero"><h1>♻️ Valorización de residuos</h1><p>Duoc UC · Vivienda Esperanza · Control físico y económico de RCD</p></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hero"><h1>♻️ Valorización de residuos</h1><p>Vivienda Esperanza · Control físico, económico y trazabilidad RCD · Duoc UC</p></div>', unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header('🕒 Centro de control')
-    components.html('''<div style="font-family:Arial;background:#0b3449;color:white;padding:13px;border-radius:12px;text-align:center"><div id="reloj" style="font-size:28px;font-weight:700"></div><div id="fecha" style="font-size:13px"></div></div><script>function tic(){let d=new Date();document.getElementById('reloj').textContent=d.toLocaleTimeString('es-CL');document.getElementById('fecha').textContent=d.toLocaleDateString('es-CL',{weekday:'long',day:'numeric',month:'long',year:'numeric'});}tic();setInterval(tic,1000);</script>''',height=92)
-    st.caption('Reloj local del navegador')
-    st.link_button('📂 Carpeta técnica Drive','https://drive.google.com/drive/folders/1VJqQTbifp-w4MRRxEkLwQInxMbYieSzE')
-    st.caption('Almacenamiento local SQLite. Para publicar con edición multiusuario se necesitará una base de datos persistente externa.')
+    st.subheader("🕒 Centro de control")
+    components.html('''<div style="font-family:Arial;background:#102e43;color:white;border-radius:12px;text-align:center;padding:12px"><div id="clock" style="font-size:27px;font-weight:bold"></div><div id="day" style="font-size:12px"></div></div><script>function tick(){const d=new Date();document.getElementById('clock').textContent=d.toLocaleTimeString('es-CL');document.getElementById('day').textContent=d.toLocaleDateString('es-CL',{dateStyle:'full'});}tick();setInterval(tick,1000)</script>''', height=90)
+    st.caption("Hora local del navegador")
+    st.link_button("📂 Antecedentes técnicos", "https://drive.google.com/drive/folders/1VJqQTbifp-w4MRRxEkLwQInxMbYieSzE")
+    st.divider()
+    if st.session_state.get("admin", False):
+        st.success("Sesión: administrador")
+        if st.button("Cerrar sesión"):
+            st.session_state.admin = False
+            st.rerun()
+    else:
+        with st.form("login"):
+            username = st.text_input("Usuario")
+            password = st.text_input("Contraseña", type="password")
+            login = st.form_submit_button("Ingresar como administrador")
+        if login:
+            correct_user = setting("auth", "username", "admin")
+            correct_hash = setting("auth", "password_hash")
+            user_ok = hmac.compare_digest(username, correct_user)
+            pass_ok = verify_password(password, correct_hash)
+            if user_ok and pass_ok:
+                st.session_state.admin = True
+                st.rerun()
+            else:
+                st.error("Credenciales incorrectas o autenticación no configurada.")
+    st.caption("Consulta pública · edición restringida a administradores")
 
-st.info('**Criterio de cálculo:** 54 paneles prefabricados de 1,22 × 2,44 m, OSB de 12,5 mm y entramado de pino 2×3. Los 54 paneles son material de obra, **no residuos**. El recorte estimado se calcula exclusivamente por vanos; no se presume que todo el panel sea desecho.')
+url = st.secrets.get("supabase", {}).get("url", "")
+server_key = st.secrets.get("supabase", {}).get("service_role_key", "")
+if not url or not server_key:
+    st.error("Falta configurar [supabase] url y service_role_key en Streamlit Secrets. La clave publishable no sirve para escritura con las políticas RLS actuales.")
+    st.stop()
+try:
+    db = db_client(url, server_key)
+    reportes = load("reportes")
+    residuos = load("residuos")
+    paneles = load("paneles")
+except Exception as exc:
+    st.error("No se pudo consultar Supabase. Comprueba la clave de servidor, la URL y las tablas.")
+    st.code(str(exc))
+    st.stop()
 
-# Valores de referencia editables; nunca se escriben automáticamente como observaciones verificadas.
-with st.expander('📐 Geometría de paneles y recortes de ventanas',expanded=True):
-    a,b,d,e=st.columns(4)
-    n=a.number_input('Paneles instalados / previstos',min_value=0,value=54,step=1)
-    largo=b.number_input('Largo del panel (m)',min_value=0.01,value=2.44,step=.01)
-    ancho=d.number_input('Ancho del panel (m)',min_value=0.01,value=1.22,step=.01)
-    espesor=e.number_input('Espesor OSB (mm)',min_value=.1,value=12.5,step=.5)
-    f,g,h=st.columns(3)
-    vanos=f.number_input('Ventanas cortadas (un)',min_value=0,value=6,step=1)
-    vano_ancho=g.number_input('Ancho del vano (m)',min_value=0.,value=1.,step=.05)
-    vano_alto=h.number_input('Alto del vano (m)',min_value=0.,value=1.,step=.05)
-    caras=st.selectbox('Caras de OSB efectivamente cortadas por vano',[1,2],index=0,help='No asumir doble cara: confirmar configuración del panel.')
-    area_panel=n*largo*ancho
-    area_recorte=vanos*vano_ancho*vano_alto*caras
-    volumen_recorte=area_recorte*espesor/1000
-    porcentaje=100*area_recorte/area_panel if area_panel else 0
-    m1,m2,m3,m4=st.columns(4)
-    m1.metric('Área nominal de 54 paneles',f'{area_panel:.2f} m²')
-    m2.metric('OSB recortado (estimado)',f'{area_recorte:.2f} m²')
-    m3.metric('Volumen OSB recortado',f'{volumen_recorte:.4f} m³')
-    m4.metric('Recorte / área nominal',f'{porcentaje:.2f} %')
-    st.caption('Cálculo geométrico bruto: supone vanos completos cortados en obra. No incluye pino 2×3, cortes adicionales, espesor de marcos ni otras pérdidas. El área nominal de paneles no equivale necesariamente al área neta instalada.')
+st.info("**Datos iniciales:** 54 paneles OSB de 1,22 × 2,44 m y 12,5 mm; seis vanos de ventana de 1 × 1 m. Los 5 m³ retirados y $27.000/m³ corresponden a antecedentes informados, aún pendientes de respaldo. No sumar el OSB al retiro global sin comprobar si ya está incluido.")
 
-st.subheader('📊 Reportes de obra')
-tab1,tab2,tab3=st.tabs(['📝 Crear reporte','📈 Visor y edición','🗂️ Historial'])
+with st.expander("📐 Cubicación de paneles y recortes", expanded=True):
+    c1, c2, c3, c4 = st.columns(4)
+    n = c1.number_input("Paneles", min_value=0, value=54, step=1)
+    width = c2.number_input("Ancho panel (m)", min_value=0.01, value=1.22)
+    height = c3.number_input("Alto panel (m)", min_value=0.01, value=2.44)
+    thickness = c4.number_input("Espesor OSB (mm)", min_value=0.1, value=12.5)
+    c5, c6, c7, c8 = st.columns(4)
+    windows = c5.number_input("Vanos cortados", min_value=0, value=6, step=1)
+    win_w = c6.number_input("Ancho vano (m)", min_value=0.0, value=1.0)
+    win_h = c7.number_input("Alto vano (m)", min_value=0.0, value=1.0)
+    faces = c8.selectbox("Caras OSB cortadas", [1, 2])
+    area = n * width * height
+    cut_area = windows * win_w * win_h * faces
+    cut_volume = cut_area * thickness / 1000
+    a, b, c, d = st.columns(4)
+    a.metric("Área nominal paneles", f"{area:.2f} m²")
+    b.metric("Área recortes OSB", f"{cut_area:.2f} m²")
+    c.metric("Volumen recortes OSB", f"{cut_volume:.4f} m³")
+    d.metric("Recorte / área nominal", f"{100 * cut_area / area if area else 0:.2f} %")
+    st.caption("Estimación geométrica: no incluye recortes del pino 2×3, ni otros cortes; verificar dimensiones reales y número de caras.")
 
-COLUMNAS=['etapa','material','cantidad','unidad','destino','calidad','costo_clp','ahorro_clp','costo_valorizacion_clp','evidencia']
-ETAPAS=['Demolición inicial','Montaje de paneles / vanos','Terminaciones','Otros']
-CALIDADES=['Informado, pendiente de respaldo','Estimación geométrica','Medido en terreno','Verificado documentalmente']
+r1, r2, r3, r4 = st.columns(4)
+r1.metric("Reportes guardados", len(reportes))
+r2.metric("Registros de residuos", len(residuos))
+r3.metric("Costo de retiros registrado", clp(residuos["costo_retiro_clp"].fillna(0).sum()) if not residuos.empty else clp(0))
+r4.metric("Volumen registrado (m³)", f"{residuos.loc[residuos['unidad'].eq('m³'), 'cantidad'].fillna(0).sum():.2f}" if not residuos.empty else "0.00")
 
+tab1, tab2, tab3 = st.tabs(["📊 Visor público", "📝 Administración", "🗂️ Historial"])
 with tab1:
-    st.caption('**Primera etapa: demolición inicial.** El retiro global informado de 5 m³ se registra una sola vez; los recortes OSB pueden formar parte de ese volumen y no deben sumarse automáticamente.')
-    with st.form('nuevo_reporte'):
-        q1,q2=st.columns(2)
-        fecha=q1.date_input('Fecha del reporte',date.today())
-        responsable=q2.text_input('Responsable del registro','Equipo Vivienda Esperanza')
-        nota=st.text_area('Observaciones / origen de los antecedentes','Datos iniciales informados; validar con guías, fotografías y cubicación.')
-        partida_inicial=pd.DataFrame([
-            ['Demolición inicial','Retiro global de residuos de demolición (composición por confirmar)',5.0,'m³','Retiro externo','Informado, pendiente de respaldo',135000.,0.,0.,'5 m³ aproximados × $27.000/m³; costo estimado, solicitar comprobante.'],
-            ['Montaje de paneles / vanos','Recortes de OSB de ventanas',round(area_recorte,4),'m²','Desecho retirado','Estimación geométrica',0.,0.,0.,f'{vanos} vanos de {vano_ancho} × {vano_alto} m; {caras} cara(s), OSB {espesor} mm; volumen {volumen_recorte:.4f} m³. No sumar al retiro global sin conciliación.'],
-            ['Montaje de paneles / vanos','Recortes de pino 2×3 de vanos',0.,'ml','Pendiente de verificar','Informado, pendiente de respaldo',0.,0.,0.,'Cantidad cero es marcador pendiente de medición, no constatación de ausencia.'],
-        ],columns=COLUMNAS)
-        datos=st.data_editor(partida_inicial,num_rows='dynamic',hide_index=True,use_container_width=True,key='editor_nuevo',column_config={
-            'etapa':st.column_config.SelectboxColumn('Etapa',options=ETAPAS,required=True),
-            'cantidad':st.column_config.NumberColumn('Cantidad',min_value=0.,format='%.4f',required=True),
-            'unidad':st.column_config.SelectboxColumn('Unidad',options=['m³','m²','kg','un','ml'],required=True),
-            'calidad':st.column_config.SelectboxColumn('Respaldo',options=CALIDADES,required=True),
-            'costo_clp':st.column_config.NumberColumn('Costo efectivo/estimado CLP',min_value=0.),
-            'ahorro_clp':st.column_config.NumberColumn('Ahorro verificado CLP',min_value=0.),
-            'costo_valorizacion_clp':st.column_config.NumberColumn('Costo valorización CLP',min_value=0.)})
-        guardar=st.form_submit_button('💾 Guardar nuevo reporte',type='primary')
-    if guardar:
-        numeros=['cantidad','costo_clp','ahorro_clp','costo_valorizacion_clp']
-        validos=all(datos[col].notna().all() for col in ['etapa','material','cantidad','unidad','destino','calidad']) and not datos.empty
-        validos=validos and all((pd.to_numeric(datos[col],errors='coerce').fillna(-1)>=0).all() for col in numeros)
-        if not responsable.strip() or not validos: st.error('Complete los campos obligatorios; cantidades y costos deben ser números no negativos.')
-        else:
-            ahora=datetime.now().isoformat(timespec='seconds')
-            with c:
-                cursor=c.execute('INSERT INTO reportes(fecha,responsable,nota,creado,actualizado) VALUES (?,?,?,?,?)',(fecha.isoformat(),responsable.strip(),nota,ahora,ahora))
-                rid=cursor.lastrowid
-                for _,r in datos.iterrows():
-                    valores=[float(r[k]) if k in numeros and pd.notna(r[k]) else (0. if k in numeros else str(r[k] if pd.notna(r[k]) else '')) for k in COLUMNAS]
-                    c.execute('INSERT INTO partidas(reporte_id,'+','.join(COLUMNAS)+') VALUES ('+','.join(['?']*11)+')',[rid]+valores)
-            st.success(f'Reporte #{rid} guardado. Puede editarlo en la pestaña Visor y edición.')
+    if residuos.empty:
+        st.warning("Todavía no existen residuos guardados. Las cifras geométricas superiores son supuestos editables, no reportes almacenados.")
+    else:
+        st.subheader("Residuos registrados por etapa")
+        tmp = residuos.copy()
+        tmp["cantidad"] = pd.to_numeric(tmp["cantidad"], errors="coerce").fillna(0)
+        st.dataframe(tmp[["id", "reporte_id", "etapa", "material", "cantidad", "unidad", "destino", "estado_verificacion", "costo_retiro_clp"]], hide_index=True, use_container_width=True)
+        st.caption("No se agregan cantidades de unidades distintas.")
+        cubic = tmp[tmp["unidad"] == "m³"].groupby("etapa", as_index=False)["cantidad"].sum()
+        if not cubic.empty:
+            st.bar_chart(cubic.set_index("etapa"))
+        st.download_button("Descargar residuos CSV", tmp.to_csv(index=False).encode("utf-8-sig"), "residuos_vivienda_esperanza.csv", "text/csv")
 
 with tab2:
-    reportes=consulta('SELECT * FROM reportes ORDER BY fecha DESC,id DESC')
-    if reportes.empty: st.warning('Guarde primero un reporte en la pestaña Crear reporte.')
+    if not st.session_state.get("admin", False):
+        st.warning("Para registrar o modificar datos, ingresa con el usuario administrador en el menú lateral.")
     else:
-        opciones={f"#{int(r.id)} · {r.fecha} · {r.responsable}":int(r.id) for r in reportes.itertuples()}
-        rid=st.selectbox('Seleccione un reporte',list(opciones),format_func=str,key='sel_reporte')
-        rid=opciones[rid]
-        actual=consulta('SELECT * FROM partidas WHERE reporte_id=? ORDER BY id',(rid,))
-        st.markdown('**Indicadores del reporte seleccionado**')
-        retiro=actual[(actual.etapa=='Demolición inicial') & (actual.unidad=='m³')]['cantidad'].sum()
-        costo=actual.costo_clp.sum()
-        ahorro=actual.ahorro_clp.sum()
-        val_cost=actual.costo_valorizacion_clp.sum()
-        k1,k2,k3,k4=st.columns(4)
-        k1.metric('Demolición / retiro declarado',f'{retiro:.2f} m³')
-        k2.metric('Costos registrados',clp(costo))
-        k3.metric('Ahorros acreditados',clp(ahorro))
-        k4.metric('Beneficio neto valorización',clp(ahorro-val_cost))
-        st.caption('Los costos de retiro no son ahorros. Beneficio neto = ahorro verificado − costo incremental de valorización. El retiro de demolición y los recortes de ventanas se mantienen separados para evitar doble conteo.')
-        l,r=st.columns(2)
-        with l:
-            st.markdown('**Costos por etapa (CLP)**')
-            st.bar_chart(actual.groupby('etapa')['costo_clp'].sum())
-        with r:
-            st.markdown('**Registros por estado de evidencia**')
-            st.bar_chart(actual['calidad'].value_counts())
-        st.markdown('**Editar cantidades, costos, destino y evidencia del reporte**')
-        with st.form(f'editar_{rid}'):
-            edit=st.data_editor(actual[COLUMNAS],num_rows='dynamic',hide_index=True,use_container_width=True,key=f'tabla_{rid}',column_config={
-                'etapa':st.column_config.SelectboxColumn('Etapa',options=ETAPAS),
-                'cantidad':st.column_config.NumberColumn('Cantidad',min_value=0.,format='%.4f'),
-                'unidad':st.column_config.SelectboxColumn('Unidad',options=['m³','m²','kg','un','ml']),
-                'calidad':st.column_config.SelectboxColumn('Respaldo',options=CALIDADES)})
-            guardar_cambios=st.form_submit_button('💾 Actualizar reporte seleccionado')
-        if guardar_cambios:
-            numericos=['cantidad','costo_clp','ahorro_clp','costo_valorizacion_clp']
-            ok=not edit.empty and all(edit[col].notna().all() for col in ['etapa','material','cantidad','unidad','destino','calidad'])
-            ok=ok and all((pd.to_numeric(edit[col],errors='coerce').fillna(-1)>=0).all() for col in numericos)
-            if not ok: st.error('Revise campos obligatorios y valores numéricos no negativos.')
+        st.subheader("Nuevo reporte y registro de residuos")
+        with st.form("new_report"):
+            fecha = st.date_input("Fecha del reporte", value=date.today())
+            responsable = st.text_input("Responsable", value="Equipo Vivienda Esperanza")
+            observaciones = st.text_area("Observaciones", value="Registro preliminar, pendiente de verificación documental")
+            st.markdown("**Residuo asociado al reporte**")
+            etapa = st.selectbox("Etapa", ["Demolición inicial", "Montaje de paneles / vanos", "Terminaciones", "Otros"])
+            material = st.text_input("Material / descripción", value="Retiro global de residuos de demolición")
+            origen = st.text_input("Origen", value="Demolición inicial")
+            a, b, c = st.columns(3)
+            cantidad = a.number_input("Cantidad", min_value=0.0, value=5.0, step=0.1)
+            unidad = b.selectbox("Unidad", ["m³", "m²", "kg", "un", "ml"])
+            costo = c.number_input("Costo retiro (CLP)", min_value=0.0, value=135000.0, step=1000.0)
+            destino = st.text_input("Destino", value="Retiro externo, destino por confirmar")
+            estado = st.selectbox("Verificación", ["Informado, pendiente de respaldo", "Estimación geométrica", "Medido en terreno", "Verificado documentalmente"])
+            evidencia = st.text_area("Evidencia / respaldo", value="5 m³ aproximados × $27.000/m³; verificar comprobante")
+            save = st.form_submit_button("💾 Guardar reporte y residuo", type="primary")
+        if save:
+            if not material.strip():
+                st.error("Indica un material o descripción.")
             else:
-                with c:
-                    c.execute('DELETE FROM partidas WHERE reporte_id=?',(rid,))
-                    for _,r in edit.iterrows():
-                        valores=[float(r[k]) if k in numericos and pd.notna(r[k]) else (0. if k in numericos else str(r[k] if pd.notna(r[k]) else '')) for k in COLUMNAS]
-                        c.execute('INSERT INTO partidas(reporte_id,'+','.join(COLUMNAS)+') VALUES ('+','.join(['?']*11)+')',[rid]+valores)
-                    c.execute('UPDATE reportes SET actualizado=? WHERE id=?',(datetime.now().isoformat(timespec='seconds'),rid))
-                st.success('Cambios almacenados en SQLite. Actualice la página para ver los indicadores recalculados.')
-        st.download_button('⬇️ Descargar detalle CSV',actual.to_csv(index=False).encode('utf-8-sig'),f'reporte_{rid}.csv',mime='text/csv')
+                try:
+                    created = db.table("reportes").insert({"fecha_reporte": fecha.isoformat(), "responsable": responsable, "observaciones": observaciones}).execute()
+                    rid = created.data[0]["id"]
+                    try:
+                        db.table("residuos").insert({"reporte_id": rid, "etapa": etapa, "material": material, "origen": origen, "cantidad": cantidad, "unidad": unidad, "destino": destino, "estado_verificacion": estado, "costo_retiro_clp": costo, "observaciones": evidencia}).execute()
+                        db.table("paneles").insert({"reporte_id": rid, "cantidad_paneles": n, "ancho_m": width, "alto_m": height, "espesor_osb_m": thickness / 1000, "cantidad_ventanas": windows, "ancho_ventana_m": win_w, "alto_ventana_m": win_h, "observaciones": f"Caras cortadas: {faces}. Área estimada: {cut_area:.4f} m²; volumen: {cut_volume:.4f} m³."}).execute()
+                    except Exception:
+                        db.table("reportes").delete().eq("id", rid).execute()
+                        raise
+                    st.success(f"Reporte #{rid} guardado en Supabase.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Error al guardar: {exc}")
+        st.divider()
+        st.subheader("Agregar residuo a un reporte existente")
+        if not reportes.empty:
+            with st.form("add_waste"):
+                rid = st.selectbox("Reporte", reportes["id"].astype(int).tolist(), format_func=lambda x: f"Reporte #{x}")
+                etapa2 = st.selectbox("Etapa", ["Demolición inicial", "Montaje de paneles / vanos", "Terminaciones", "Otros"], key="e2")
+                mat2 = st.text_input("Material", value="Recortes OSB de ventanas")
+                col1, col2, col3 = st.columns(3)
+                qty2 = col1.number_input("Cantidad", min_value=0.0, value=float(cut_area), key="q2")
+                unit2 = col2.selectbox("Unidad", ["m²", "m³", "kg", "un", "ml"], key="u2")
+                cost2 = col3.number_input("Costo retiro CLP", min_value=0.0, value=0.0, key="c2")
+                dest2 = st.text_input("Destino", value="Desecho retirado, destino por confirmar", key="d2")
+                status2 = st.selectbox("Verificación", ["Estimación geométrica", "Informado, pendiente de respaldo", "Medido en terreno", "Verificado documentalmente"], key="s2")
+                notes2 = st.text_area("Observaciones", value=f"{windows} ventanas, {faces} cara(s), OSB {thickness} mm; no sumar al retiro global sin conciliación.", key="n2")
+                add = st.form_submit_button("Agregar residuo")
+            if add:
+                try:
+                    db.table("residuos").insert({"reporte_id": int(rid), "etapa": etapa2, "material": mat2, "origen": "Montaje / corte en obra", "cantidad": qty2, "unidad": unit2, "destino": dest2, "estado_verificacion": status2, "costo_retiro_clp": cost2, "observaciones": notes2}).execute()
+                    st.success("Residuo agregado.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Error: {exc}")
+        st.divider()
+        st.subheader("Modificar un registro existente")
+        if not residuos.empty:
+            with st.form("edit_waste"):
+                selected = st.selectbox("ID del registro", residuos["id"].astype(int).tolist())
+                current = residuos.loc[residuos["id"] == selected].iloc[0]
+                material_edit = st.text_input("Descripción", value=str(current["material"]))
+                q_edit = st.number_input("Cantidad actualizada", min_value=0.0, value=float(current["cantidad"]), key=f"editq{selected}")
+                cost_edit = st.number_input("Costo retiro actualizado CLP", min_value=0.0, value=float(current["costo_retiro_clp"] or 0), key=f"editc{selected}")
+                evidence_edit = st.text_area("Respaldo de modificación", value=str(current.get("observaciones") or ""))
+                update = st.form_submit_button("Guardar modificación")
+            if update:
+                try:
+                    db.table("residuos").update({"material": material_edit, "cantidad": q_edit, "costo_retiro_clp": cost_edit, "observaciones": evidence_edit}).eq("id", int(selected)).execute()
+                    st.success("Registro actualizado.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Error: {exc}")
 
 with tab3:
-    historial=consulta('''SELECT r.id,r.fecha,r.responsable,r.actualizado,
-        COUNT(p.id) registros,
-        COALESCE(SUM(CASE WHEN p.etapa='Demolición inicial' AND p.unidad='m³' THEN p.cantidad ELSE 0 END),0) retiro_demolicion_m3,
-        COALESCE(SUM(p.costo_clp),0) costos_clp,
-        COALESCE(SUM(p.ahorro_clp-p.costo_valorizacion_clp),0) beneficio_neto_clp
-        FROM reportes r LEFT JOIN partidas p ON p.reporte_id=r.id
-        GROUP BY r.id ORDER BY r.fecha,r.id''')
-    if historial.empty: st.warning('Aún no existen reportes guardados.')
+    if reportes.empty:
+        st.info("Sin reportes registrados.")
     else:
-        st.dataframe(historial,hide_index=True,use_container_width=True)
-        st.line_chart(historial.set_index('fecha')[['costos_clp','beneficio_neto_clp']])
-        st.download_button('⬇️ Descargar historial CSV',historial.to_csv(index=False).encode('utf-8-sig'),'historial_vivienda_esperanza.csv',mime='text/csv')
-        st.caption('Cada fila es una fotografía de un reporte. No sumar los volúmenes entre fechas si los reportes registran valores acumulados.')
+        st.dataframe(reportes[["id", "fecha_reporte", "responsable", "observaciones", "creado_en"]], use_container_width=True, hide_index=True)
+        st.download_button("Descargar historial CSV", reportes.to_csv(index=False).encode("utf-8-sig"), "reportes_vivienda_esperanza.csv", "text/csv")
+    if not paneles.empty:
+        with st.expander("Registros de geometría de paneles"):
+            st.dataframe(paneles, use_container_width=True, hide_index=True)
 
-st.divider()
-st.caption('Modelo piloto · Valores iniciales declarados o estimados, pendientes de respaldo técnico. Fuente: antecedentes del proyecto Vivienda Esperanza y registro del equipo de obra. Base local: vivienda_esperanza.sqlite3.')
+st.caption("Proyecto Vivienda Esperanza · Registro de datos y estimaciones diferenciados · Los costos de retiro no son ahorros ni valorización económica verificada.")
